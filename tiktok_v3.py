@@ -149,35 +149,85 @@ def Delay(value):
 def is_android():
     return os.path.exists('/system/bin/pm') or 'ANDROID_ROOT' in os.environ
 
-def check_tiktok_installed_android():
+# Bản TikTok VN/Châu Á = trill, bản quốc tế = musically
+TIKTOK_PACKAGES = ['com.ss.android.ugc.trill', 'com.zhiliaoapp.musically']
+_tiktok_pkg_cache = {'done': False, 'pkg': None}
+
+def get_tiktok_package():
+    """Trả về package TikTok đang cài trên Android (None nếu chưa cài)."""
+    if _tiktok_pkg_cache['done']:
+        return _tiktok_pkg_cache['pkg']
+    pkg = None
     try:
         r = subprocess.run(['pm', 'list', 'packages'], capture_output=True, text=True, timeout=10)
-        p = r.stdout.lower()
-        return 'com.zhiliaoapp.musically' in p or 'com.ss.android.ugc.trill' in p
-    except:
-        return False
+        installed = r.stdout.lower()
+        for p in TIKTOK_PACKAGES:
+            if p in installed:
+                pkg = p
+                break
+    except Exception:
+        pass
+    _tiktok_pkg_cache.update(done=True, pkg=pkg)
+    return pkg
 
-def open_on_android(uri):
+def check_tiktok_installed_android():
+    return get_tiktok_package() is not None
+
+def open_on_android(uri, package=None):
+    """Mở uri bằng intent VIEW. Có package -> ép mở thẳng trong app đó.
+    Trả về True nếu lệnh am chạy thành công."""
+    cmd = ['am', 'start', '-a', 'android.intent.action.VIEW', '-d', uri]
+    if package:
+        cmd += ['-p', package]
     try:
-        subprocess.run(['am', 'start', '-a', 'android.intent.action.VIEW', '-d', uri],
-                       capture_output=True, timeout=10)
-        return True
-    except:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        out = (r.stdout or '') + (r.stderr or '')
+        return r.returncode == 0 and 'Error' not in out and 'unable' not in out.lower()
+    except Exception:
         return False
 
-def open_tiktok_profile(username):
-    username = username.lstrip('@').strip()
-    if not username:
+def open_in_tiktok_app(url, extra_uris=()):
+    """Thử mở url trong app TikTok; lần lượt thử các uri phụ; cuối cùng mới mở trình duyệt."""
+    pkg = get_tiktok_package()
+    if pkg:
+        for uri in (url, *extra_uris):
+            if open_on_android(uri, pkg):
+                return True
+    return open_on_android(url)  # fallback: để Android tự chọn app/trình duyệt
+
+def build_profile_url(target):
+    """Nhận username / @username / link đầy đủ -> link profile chuẩn."""
+    target = str(target).strip()
+    if target.lower().startswith('http'):
+        return target
+    return f"https://www.tiktok.com/@{target.lstrip('@')}"
+
+def open_tiktok_profile(target):
+    """Mở đúng profile cần follow. target: username, @username, link, hoặc uid số."""
+    target = str(target or '').strip()
+    if not target:
         return False
-    web_url = f"https://www.tiktok.com/@{username}"
-    deep_link = f"snssdk1233://user/profile/{username}"
+    web_url = build_profile_url(target)
+    extra = []
+    # uid dạng số (không phải username) -> deep link nội bộ của app mới mở đúng người
+    if target.isdigit() and len(target) >= 8:
+        web_url = None
+        extra = [f"snssdk1233://user/profile/{target}",
+                 f"snssdk1180://user/profile/{target}"]
 
     if is_android():
-        if check_tiktok_installed_android():
-            open_on_android(deep_link)
-        else:
-            open_on_android(web_url)
-        return True
+        if web_url:
+            return open_in_tiktok_app(web_url)
+        pkg = get_tiktok_package()
+        for uri in extra:
+            if open_on_android(uri, pkg):
+                return True
+        print(f'{do}Không mở được profile uid {target}')
+        return False
+
+    if not web_url:
+        print(f'{do}Job chỉ có uid {target}, PC không mở được profile theo uid')
+        return False
 
     # PC: chỉ mở browser
     try:
@@ -194,11 +244,7 @@ def open_tiktok_video(video_url):
     if not video_url:
         return False
     if is_android():
-        if check_tiktok_installed_android():
-            open_on_android(video_url)
-        else:
-            open_on_android(video_url)
-        return True
+        return open_in_tiktok_app(video_url)
     try:
         if os.name == 'nt':
             os.startfile(video_url)
@@ -568,7 +614,10 @@ while True:
 
             # Mở link
             if action in ('FOLLOW', 'FOLLOW-VIP'):
-                if target_user:
+                # Ưu tiên link profile từ job (nếu có), không thì dùng username
+                if video_url and 'tiktok.com' in video_url:
+                    open_tiktok_profile(video_url)
+                elif target_user:
                     open_tiktok_profile(target_user)
             elif action == 'LIKE':
                 if video_url:
